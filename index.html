@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>鼻尖大消除 - 动感体感游戏</title>
+    <!-- 引入样式表，负责页面的美化 -->
+    <link rel="stylesheet" href="style.css">
+    
+    <!-- Google Fonts 字体库，让文字更好看 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fredoka+One&family=Varela+Round&display=swap" rel="stylesheet">
+
+    <!-- MediaPipe 库：本地化加载 -->
+    <!-- 优先使用本地文件 -->
+    <script src="js/libs/mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="js/libs/mediapipe/control_utils/control_utils.js"></script>
+    <script src="js/libs/mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="js/libs/mediapipe/pose/pose.js"></script>
+</head>
+
+<body>
+    <!-- 检测是否直接双击打开 (file:// 协议) -->
+    <script>
+        if (window.location.protocol === 'file:') {
+            alert("⚠️ 警告：\n检测到你直接打开了 index.html 文件。\n\n由于浏览器的安全限制，这样会导致游戏无法运行（模块加载失败）。\n\n请使用 VS Code 的 'Live Server' 插件，或者在命令行运行 'python -m http.server' 来启动游戏。");
+            document.body.innerHTML = '<h1 style="color:red; padding:20px;">请勿直接双击打开文件</h1><p style="padding:20px; font-size:20px;">请使用本地服务器运行此游戏。<br>推荐：在 VS Code 中右键 index.html 选择 "Open with Live Server"。</p>';
+        }
+    </script>
+    <div class="game-container">
+        <!-- 隐藏的视频元素：用来接收摄像头的原始画面，但不直接显示给用户看 -->
+        <video class="input_video" style="display: none;"></video>
+
+        <!-- 主画布 (Canvas)：这是游戏的"舞台"，我们在上面画出游戏画面和摄像头画面 -->
+        <canvas class="output_canvas"></canvas>
+
+        <!-- UI 层：覆盖在画布上面的文字、按钮等界面元素 -->
+        <div class="ui-layer">
+            <!-- 分数板 -->
+            <div class="score-board player1">P1: <span id="score">0</span></div>
+            <!-- 双人模式时的第二个分数板 -->
+            <div class="score-board player2 hidden" id="score-board-p2">P2: <span id="score-p2">0</span></div>
+            <!-- 双人模式的分界线 -->
+            <div class="center-line hidden" id="center-line"></div>
+            <!-- 返回菜单按钮 -->
+            <button id="back-btn" class="back-button hidden" onclick="returnToMenu()">🏠 菜单</button>
+
+            <!-- 排行榜弹窗 (游戏开始前查看) -->
+            <div id="leaderboard-modal" class="game-menu hidden" style="z-index: 150;">
+                <h1>🏆 排行榜</h1>
+                <div id="leaderboard-list" style="text-align: left; font-size: 24px; width: 100%; margin: 20px 0;">
+                    <!-- 这里的内容会由 JavaScript 动态生成 -->
+                </div>
+                <div style="font-size: 18px; color: #aaa;">(5秒后自动关闭，或用鼻子触碰按钮)</div>
+                <button id="close-leaderboard-btn" onclick="closeLeaderboard()">开始游戏</button>
+            </div>
+
+            <!-- 输入名字弹窗 (打破纪录时显示) -->
+            <div id="name-input-modal" class="game-menu hidden" style="z-index: 160;">
+                <h1>新纪录! 🎉</h1>
+                <p>请输入你的名字:</p>
+                <input type="text" id="player-name-input" maxlength="8" style="font-size: 24px; padding: 10px; border-radius: 10px; border: none; text-align: center;">
+                <!-- 虚拟键盘，方便在电视或触摸屏上操作 -->
+                <div id="virtual-keyboard" style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; margin-top: 10px;">
+                    <!-- 键盘按键由 JS 生成 -->
+                </div>
+                <button onclick="submitHighScore()">确定</button>
+            </div>
+
+            <!-- 连击显示 (Combo) -->
+            <div id="combo-display" class="combo-container hidden">
+                <div class="combo-count">x<span id="combo-num">0</span></div>
+                <div class="combo-label">COMBO!</div>
+            </div>
+
+            <!-- 加载提示 -->
+    <div id="loading" class="loading">
+        <div id="loading-text">摄像头启动中...<br>请允许摄像头权限并站在镜头前</div>
+        <div id="loading-subtext" style="font-size: 16px; margin-top: 10px; color: #aaa;"></div>
+    </div>
+
+    <!-- 独立检测脚本：防止 main.js 加载失败导致死机 -->
+    <script>
+        // 全局刷新函数，方便各个模块调用
+        window.reloadPage = function() {
+            location.reload();
+        };
+
+        window.isLocalLibsLoaded = false;
+        window.addEventListener('load', () => {
+             if (typeof Pose !== 'undefined' && typeof Camera !== 'undefined') {
+                 window.isLocalLibsLoaded = true;
+                 if (window.__mpStatus) window.__mpStatus.libs = true;
+             }
+        });
+
+        setTimeout(() => {
+            const loading = document.getElementById('loading');
+            // 如果 loading 还在显示，且内容没有变成错误提示
+            if (loading && getComputedStyle(loading).display !== 'none' && !loading.innerHTML.includes('❌')) {
+                if (typeof Pose === 'undefined') {
+                    document.getElementById('loading').innerHTML =
+                        "❌ 核心组件未加载<br>请确认目录 js/libs/mediapipe 存在。<br><button onclick='reloadPage()' style='margin-top:10px; padding: 5px 10px; cursor: pointer;'>刷新重试</button>";
+                    return;
+                }
+
+                const s = window.__mpStatus || {};
+                if (s.libs && s.poseReady && !s.cameraStarted) {
+                    document.getElementById('loading-subtext').innerHTML =
+                        "⏳ 正在等待摄像头授权或初始化...";
+                } else {
+                    document.getElementById('loading-subtext').innerHTML =
+                        "⏳ 加载较慢，请稍候或刷新页面";
+                }
+            }
+        }, 8000);
+    </script>
+
+    <!-- 开始菜单屏幕 -->
+            <div id="start-screen" class="game-menu">
+                <h1>鼻尖大消除</h1>
+                
+                <!-- 游戏模式选择 -->
+                <div class="settings-group">
+                    <label>🎮 游戏模式</label>
+                    <div class="toggle-group mode-select">
+                        <input type="radio" id="game-pop" name="gamemode" value="pop" checked>
+                        <label for="game-pop">🎈 经典消除</label>
+
+                        <input type="radio" id="game-dodge" name="gamemode" value="dodge">
+                        <label for="game-dodge">☄️ 陨石躲避</label>
+
+                        <input type="radio" id="game-juggle" name="gamemode" value="juggle">
+                        <label for="game-juggle">🦵 膝盖颠球</label>
+
+                        <!-- 水果忍者暂时隐藏
+                        <input type="radio" id="game-slice" name="gamemode" value="slice">
+                        <label for="game-slice">⚔️ 水果忍者</label>
+                        -->
+
+                        <input type="radio" id="game-literacy" name="gamemode" value="literacy">
+                        <label for="game-literacy">📚 识字大挑战</label>
+
+                        <input type="radio" id="game-quiz" name="gamemode" value="quiz">
+                        <label for="game-quiz">👂 听音选字</label>
+                    </div>
+                </div>
+
+                <!-- 识字/问答模式的特定设置 -->
+                <div class="settings-group hidden" id="literacy-settings">
+                    <label>📖 课程范围选择</label>
+                    <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+                        <select id="course-category" class="game-select" onchange="updateSubCategories()">
+                            <option value="kindergarten">幼儿园识字</option>
+                        </select>
+                        <select id="course-sub" class="game-select">
+                            <!-- 子选项由 JS 填充 -->
+                        </select>
+                    </div>
+                </div>
+
+                <!-- 语音设置 (用于问答/识字模式) -->
+                <div class="settings-group hidden" id="tts-settings">
+                    <label>🗣️ 语音设置</label>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <select id="tts-voice" class="game-select" style="flex: 1;">
+                            <option value="">默认语音</option>
+                        </select>
+                        <button onclick="testTTS()" style="padding: 10px 20px; font-size: 16px;">试听</button>
+                    </div>
+                    <div style="margin-top: 10px;">
+                        <label style="font-size: 16px;">语速: <span id="tts-rate-val">1.0</span></label>
+                        <input type="range" id="tts-rate" min="0.5" max="2" value="1.0" step="0.1" oninput="document.getElementById('tts-rate-val').innerText = this.value">
+                    </div>
+                </div>
+
+                <!-- 背景音乐设置 -->
+                <div class="settings-group">
+                    <label>🎵 背景音乐</label>
+                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                        <div class="toggle-group">
+                            <input type="checkbox" id="bgm-toggle" class="toggle-checkbox">
+                            <label for="bgm-toggle" class="toggle-label">开启</label>
+                        </div>
+                        <select id="bgm-select" class="game-select" style="flex: 1; min-width: 120px;">
+                            <!-- 音乐列表由 JS 填充 -->
+                        </select>
+                    </div>
+                </div>
+
+                <!-- 操控方式选择 -->
+                <div class="settings-group">
+                    <label>🎮 操控方式</label>
+                    <div class="radio-option" id="opt-nose">
+                        <input type="radio" name="mode" value="nose" id="mode-nose" checked>
+                        <label for="mode-nose">👃 仅鼻子</label>
+                    </div>
+                    <div class="radio-option" id="opt-single">
+                        <input type="radio" name="mode" value="single" id="mode-single">
+                        <label for="mode-single">👐 双手</label>
+                    </div>
+                    <div class="radio-option hidden" id="opt-body">
+                        <input type="radio" name="mode" value="body" id="mode-body">
+                        <label for="mode-body">🏃 移动躯干</label>
+                    </div>
+                </div>
+
+                <!-- 玩家数量选择 -->
+                <div class="settings-group">
+                    <label>👥 玩家数量</label>
+                    <div class="toggle-group">
+                        <input type="radio" id="players-1" name="playercount" value="1" checked>
+                        <label for="players-1">👤 单人</label>
+
+                        <input type="radio" id="players-2" name="playercount" value="2">
+                        <label for="players-2">👥 双人</label>
+                    </div>
+                    <small class="hint" id="dual-hint" style="display:none;">💡 双人模式：两位玩家请分别站在画面左右两侧</small>
+                </div>
+
+                <!-- 速度调节滑块 -->
+                <div class="settings-group">
+                    <label>🚀 气泡速度: <span id="speed-val">正常</span></label>
+                    <input type="range" id="speed-slider" min="1" max="5" value="2" step="1">
+                    <div class="range-labels">
+                        <span>慢</span><span>正常</span><span>快</span><span>极速</span>
+                    </div>
+                </div>
+
+                <!-- 底部按钮区 -->
+                <div style="display: flex; gap: 10px; margin-top: 20px;">
+                    <button onclick="showLeaderboard()" style="background: #FFD700; color: #333; flex: 1;">🏆 排行榜</button>
+                    <button onclick="startGame()" style="flex: 2;">开始游戏</button>
+                </div>
+            </div>
+
+            <!-- 游戏结束屏幕 -->
+            <div id="game-over" class="game-over hidden">
+                <h1>游戏结束</h1>
+                <p>最终得分: <span id="final-score">0</span></p>
+                <button onclick="returnToMenu()">返回菜单</button>
+                <button onclick="restartGame()">再玩一次</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 识字数据文件 -->
+    <script src="literacy_data.js"></script>
+    <!-- 主游戏逻辑入口 (type="module" 表示这是一个模块化脚本) -->
+    <script type="module" src="js/main.js?v=local"></script>
+</body>
+
+</html>
