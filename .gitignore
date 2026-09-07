@@ -1,0 +1,6 @@
+# 旧文件/废弃文件
+script_old.js
+熊猫博士识字
+# Python 缓存
+__pycache__/
+*.pyc
